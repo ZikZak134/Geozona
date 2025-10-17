@@ -1,154 +1,172 @@
-// services/geoService.ts
 import type { OutputFile } from '../types';
 
-// Declare turf and XLSX to satisfy TypeScript, as they are loaded from a CDN.
+// Declare turf and XLSX as globals since they are loaded from script tags in index.html
 declare const turf: any;
 declare const XLSX: any;
 
-const CHUNK_SIZE = 200;
-
 /**
- * Parses an Excel file (.xlsx, .xls) containing coordinates into a GeoJSON Polygon string.
- * It automatically creates a convex hull around the points.
- * Supports two formats:
- * 1. A single column with "latitude,longitude".
- * 2. Two separate columns for latitude and longitude.
- * @param file The Excel file to parse.
- * @returns A promise that resolves with a GeoJSON Feature string.
+ * Parses an Excel file containing polygon coordinates into a GeoJSON string
+ * using a client-side algorithm (SheetJS + Turf.js).
+ * @param file The Excel file (.xlsx or .xls).
+ * @returns A promise that resolves to a GeoJSON string of a Polygon Feature.
  */
-export const parseExcelToGeoJson = (file: File): Promise<string> => {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      try {
-        const data = new Uint8Array(e.target!.result as ArrayBuffer);
-        const workbook = XLSX.read(data, { type: 'array' });
-        const sheetName = workbook.SheetNames[0];
-        const worksheet = workbook.Sheets[sheetName];
-        const json: (string | number)[][] = XLSX.utils.sheet_to_json(worksheet, { header: 1 });
+export async function parseExcelToGeoJson(file: File): Promise<string> {
+  const data = await file.arrayBuffer();
+  const workbook = XLSX.read(data);
+  const sheetName = workbook.SheetNames[0];
+  const worksheet = workbook.Sheets[sheetName];
+  const jsonArray: any[] = XLSX.utils.sheet_to_json(worksheet, { header: 1 });
 
-        const coordinates: number[][] = [];
-        for (const row of json) {
-          if (!row || row.length === 0) continue;
+  const points: any[] = [];
+  const latKeys = ['lat', 'latitude', 'широта'];
+  const lonKeys = ['lon', 'lng', 'longitude', 'долгота'];
 
-          let lat: number | undefined, lon: number | undefined;
+  let latIndex = -1;
+  let lonIndex = -1;
 
-          // Case 1: Single column with "lat,lon"
-          if (typeof row[0] === 'string' && row[0].includes(',')) {
-            const parts = row[0].split(',').map(s => parseFloat(s.trim()));
+  // Find header indices if they exist
+  const header = jsonArray[0] as string[];
+  if (header && header.length > 0) {
+      header.forEach((h, i) => {
+          const lowerH = h.toString().toLowerCase();
+          if (latKeys.includes(lowerH)) latIndex = i;
+          if (lonKeys.includes(lowerH)) lonIndex = i;
+      });
+  }
+
+
+  for (const row of jsonArray) {
+    // Skip empty rows
+    if (!row || row.length === 0) continue;
+    
+    let lat: number | null = null;
+    let lon: number | null = null;
+
+    if (latIndex !== -1 && lonIndex !== -1) {
+        // Parse using header indices
+        lat = parseFloat(String(row[latIndex]).replace(',', '.'));
+        lon = parseFloat(String(row[lonIndex]).replace(',', '.'));
+    } else {
+        // Fallback: try to parse from first two columns or a single comma-separated column
+        const firstCol = String(row[0]);
+        if (firstCol.includes(',')) {
+            const parts = firstCol.split(',').map(p => parseFloat(p.trim().replace(',', '.')));
             if (parts.length === 2 && !isNaN(parts[0]) && !isNaN(parts[1])) {
-              lat = parts[0];
-              lon = parts[1];
+                // Assuming lat, lon
+                lat = parts[0];
+                lon = parts[1];
             }
-          } 
-          // Case 2: Two separate columns
-          else if (row.length >= 2) {
-             const val1 = parseFloat(String(row[0]));
-             const val2 = parseFloat(String(row[1]));
-             if (!isNaN(val1) && !isNaN(val2)) {
-                lat = val1;
-                lon = val2;
-             }
-          }
-
-          if (typeof lat === 'number' && typeof lon === 'number') {
-            // Standard GeoJSON format is [longitude, latitude]
-            coordinates.push([lon, lat]);
-          }
+        } else if (row.length >= 2) {
+             // Assuming first column is lat, second is lon
+             lat = parseFloat(firstCol.replace(',', '.'));
+             lon = parseFloat(String(row[1]).replace(',', '.'));
         }
+    }
+    
+    if (lat !== null && lon !== null && !isNaN(lat) && !isNaN(lon)) {
+        // GeoJSON uses [longitude, latitude]
+        points.push(turf.point([lon, lat]));
+    }
+  }
 
-        if (coordinates.length < 3) {
-          reject(new Error('Не удалось найти достаточно валидных координат (требуется минимум 3) для построения полигона.'));
-          return;
-        }
+  if (points.length < 3) {
+    throw new Error('В Excel-файле не найдено достаточного количества валидных координат (требуется минимум 3 точки) для построения полигона.');
+  }
 
-        const points = turf.featureCollection(
-            coordinates.map(coord => turf.point(coord))
-        );
-        
-        // Create a convex hull polygon containing all points
-        const convexHull = turf.convex(points);
-        if (!convexHull) {
-            reject(new Error('Не удалось создать полигон (выпуклую оболочку) из предоставленных точек.'));
-            return;
-        }
+  const featureCollection = turf.featureCollection(points);
+  const convexPolygon = turf.convex(featureCollection);
 
-        resolve(JSON.stringify(convexHull));
-      } catch (error) {
-        reject(new Error('Не удалось обработать Excel-файл. Убедитесь, что он имеет правильный формат.'));
-      }
-    };
-    reader.onerror = () => reject(new Error('Не удалось прочитать файл.'));
-    reader.readAsArrayBuffer(file);
-  });
-};
+  if (!convexPolygon || convexPolygon.geometry.type !== 'Polygon') {
+     throw new Error('Не удалось построить полигон из предоставленных точек. Убедитесь, что точки образуют валидную область.');
+  }
+
+  // The generatePointsFromGeoJson function can handle a Feature, so this is fine.
+  return JSON.stringify(convexPolygon);
+}
 
 
 /**
- * Generates formatted coordinate points within a given GeoJSON polygon.
- * @param geoJsonString The GeoJSON data as a string.
- * @param regionName The name of the region for labeling.
- * @param radiusKm The radius for points and the buffer from the border.
- * @returns A promise that resolves with an array of output files.
+ * Generates coverage points within a given GeoJSON polygon using a deterministic
+ * client-side algorithm (Turf.js) to ensure 100% gapless coverage.
+ * @param geoJsonString The GeoJSON of the polygon.
+ * @param regionName The name of the region for context.
+ * @param radiusKm The radius for point coverage and boundary offset.
+ * @returns A promise that resolves to an array of chunked TXT OutputFile objects.
  */
-export const generatePointsFromGeoJson = async (
-    geoJsonString: string, 
-    regionName: string, 
-    radiusKm: number
-): Promise<OutputFile[]> => {
+export async function generatePointsFromGeoJson(
+  geoJsonString: string,
+  regionName: string,
+  radiusKm: number
+): Promise<OutputFile[]> {
+  try {
     const geoJson = JSON.parse(geoJsonString);
-
-    // Find the first polygon or multipolygon feature
-    let feature;
-    if (geoJson.type === 'FeatureCollection') {
-        feature = geoJson.features.find((f: any) => 
-            f.geometry && (f.geometry.type === 'Polygon' || f.geometry.type === 'MultiPolygon')
-        );
-    } else if (geoJson.type === 'Feature' && geoJson.geometry && (geoJson.geometry.type === 'Polygon' || geoJson.geometry.type === 'MultiPolygon')) {
-        feature = geoJson;
+    
+    let geometry;
+    if (geoJson.type === 'Feature') {
+        geometry = geoJson.geometry;
     } else if (geoJson.type === 'Polygon' || geoJson.type === 'MultiPolygon') {
-        feature = turf.feature(geoJson);
+        geometry = geoJson;
+    } else if (geoJson.type === 'FeatureCollection' && geoJson.features.length > 0) {
+        const polyFeature = geoJson.features.find((f: any) => f.geometry && (f.geometry.type === 'Polygon' || f.geometry.type === 'MultiPolygon'));
+        if (polyFeature) geometry = polyFeature.geometry;
     }
 
-    if (!feature) {
+    if (!geometry) {
         throw new Error('В предоставленных данных не найдена геометрия типа "Полигон" или "Мультиполигон".');
     }
+    
+    const bufferedPolygon = turf.buffer(geometry, -radiusKm, { units: 'kilometers' });
 
-    // Create a negative buffer to work inside the boundary
-    const buffered = turf.buffer(feature, -radiusKm, { units: 'kilometers' });
-    if (!buffered || buffered.geometry.coordinates.length === 0) {
-        throw new Error(`Не удалось сгенерировать точки. Возможно, указанный регион слишком мал или имеет неподходящую форму для внутреннего отступа в ${radiusKm} км.`);
+    if (!bufferedPolygon || !bufferedPolygon.geometry || bufferedPolygon.geometry.coordinates.length === 0 || bufferedPolygon.geometry.coordinates[0].length === 0) {
+      throw new Error(`Не удалось сгенерировать точки. Возможно, указанный регион слишком мал или имеет неподходящую форму для внутреннего отступа в ${radiusKm} км.`);
     }
 
-    // Use a step that ensures full coverage (diagonal of a square with side = radius * 2)
-    // A simpler grid step is often sufficient and faster. We use radius * sqrt(2).
-    const gridStep = radiusKm * Math.sqrt(2);
-    const bbox = turf.bbox(buffered);
-    const grid = turf.pointGrid(bbox, gridStep, { units: 'kilometers' });
+    // Use a hexagonal grid for optimal coverage.
+    // Setting the cell side length to radiusKm ensures overlap and full coverage.
+    const hexGrid = turf.hexGrid(turf.bbox(bufferedPolygon), radiusKm, { units: 'kilometers' });
 
-    // Filter points to be strictly within the buffered zone
-    const pointsWithin = turf.pointsWithinPolygon(grid, buffered);
-
-    if (pointsWithin.features.length === 0) {
-        throw new Error(`Не удалось сгенерировать ни одной точки внутри указанной зоны с отступом в ${radiusKm} км.`);
-    }
-
-    // Format points for output
-    const formattedLines = pointsWithin.features.map((f: any) => {
-        const coord = f.geometry.coordinates;
-        return `${regionName}:${radiusKm}km:${coord[1].toFixed(6)},${coord[0].toFixed(6)}`; // lat,lon
+    const points: { latitude: number; longitude: number; }[] = [];
+    turf.featureEach(hexGrid, (cell: any) => {
+      const center = turf.centroid(cell);
+      if (turf.booleanPointInPolygon(center, bufferedPolygon)) {
+        const [longitude, latitude] = center.geometry.coordinates;
+        points.push({ latitude, longitude });
+      }
     });
 
-    // Chunk into files
-    const outputFiles: OutputFile[] = [];
-    for (let i = 0; i < formattedLines.length; i += CHUNK_SIZE) {
-        const chunk = formattedLines.slice(i, i + CHUNK_SIZE);
-        const fileNumber = Math.floor(i / CHUNK_SIZE) + 1;
-        outputFiles.push({
-            name: `${regionName}_part${fileNumber}.txt`,
+    if (points.length === 0) {
+       throw new Error(`Не удалось сгенерировать точки. Внутри созданной буферной зоны (${radiusKm} км) не поместилось ни одного центра точки.`);
+    }
+
+    const slugify = (text: string) => {
+        return text.toString().toLowerCase()
+            .replace(/\s+/g, '-')
+            .replace(/[^\w\-]+/g, '')
+            .replace(/\-\-+/g, '-')
+            .replace(/^-+/, '')
+            .replace(/-+$/, '');
+    };
+    const regionSlug = slugify(regionName);
+    const lines = points.map(p => `${regionSlug}:${radiusKm}km:${p.latitude}, ${p.longitude}`);
+
+    const files: OutputFile[] = [];
+    const pointsPerFile = 200;
+    for (let i = 0; i < lines.length; i += pointsPerFile) {
+        const chunk = lines.slice(i, i + pointsPerFile);
+        const fileNumber = (i / pointsPerFile) + 1;
+        files.push({
+            name: `${regionSlug}_part${fileNumber}.txt`,
             content: chunk.join('\n'),
         });
     }
 
-    return outputFiles;
-};
+    return files;
+
+  } catch (e: any) {
+    console.error("Error during point generation:", e);
+    if (e.message.startsWith('Не удалось')) {
+        throw e;
+    }
+    throw new Error('Произошла ошибка при обработке геометрии. Убедитесь, что файл содержит корректный полигон.');
+  }
+}
