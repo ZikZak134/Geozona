@@ -17,6 +17,9 @@ function App() {
   const [outputFiles, setOutputFiles] = useState<OutputFile[]>([]);
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
+  const [generationProgress, setGenerationProgress] = useState<number>(0);
+  const [totalFiles, setTotalFiles] = useState<number | null>(null);
+
 
   const [searchQuery, setSearchQuery] = useState('');
   const [isSearching, setIsSearching] = useState(false);
@@ -75,6 +78,8 @@ function App() {
     setIsLoading(true);
     setError(null);
     setOutputFiles([]);
+    setGenerationProgress(0);
+    setTotalFiles(null);
 
     try {
       let geoJsonString: string;
@@ -86,8 +91,17 @@ function App() {
         geoJsonString = await selectedFile.text();
       }
       
-      const result = await generatePointsFromGeoJson(geoJsonString, regionName, radiusKm);
-      setOutputFiles(result);
+      const generator = generatePointsFromGeoJson(geoJsonString, regionName, radiusKm);
+
+      for await (const result of generator) {
+        if (result.type === 'progress') {
+          setGenerationProgress(result.value);
+        } else if (result.type === 'totalFiles') {
+          setTotalFiles(result.value);
+        } else if (result.type === 'file') {
+          setOutputFiles(prevFiles => [...prevFiles, result.value]);
+        }
+      }
 
     } catch (err: unknown) {
       let errorMessage = 'Произошла неизвестная ошибка.';
@@ -97,6 +111,7 @@ function App() {
       setError(errorMessage);
     } finally {
       setIsLoading(false);
+      setGenerationProgress(100);
     }
   };
 
@@ -202,6 +217,8 @@ function App() {
               outputFiles={outputFiles}
               isLoading={isLoading}
               error={error}
+              progress={generationProgress}
+              totalFiles={totalFiles}
             />
           )}
         </main>

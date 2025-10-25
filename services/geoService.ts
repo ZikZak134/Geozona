@@ -84,20 +84,25 @@ export async function parseExcelToGeoJson(file: File): Promise<string> {
   return JSON.stringify(convexPolygon);
 }
 
+// Define the types for the yielded results from the generator
+type GenerationResult = 
+  | { type: 'progress'; value: number }
+  | { type: 'totalFiles'; value: number }
+  | { type: 'file'; value: OutputFile };
 
 /**
- * Generates coverage points within a given GeoJSON polygon using a deterministic
- * client-side algorithm (Turf.js) to ensure 100% gapless coverage.
+ * Generates coverage points within a given GeoJSON polygon and yields progress
+ * and generated files in real-time.
  * @param geoJsonString The GeoJSON of the polygon.
  * @param regionName The name of the region for context.
  * @param radiusKm The radius for point coverage and boundary offset.
- * @returns A promise that resolves to an array of chunked TXT OutputFile objects.
+ * @returns An async generator that yields progress updates and OutputFile objects.
  */
-export async function generatePointsFromGeoJson(
+export async function* generatePointsFromGeoJson(
   geoJsonString: string,
   regionName: string,
   radiusKm: number
-): Promise<OutputFile[]> {
+): AsyncGenerator<GenerationResult> {
   try {
     const geoJson = JSON.parse(geoJsonString);
     
@@ -121,18 +126,25 @@ export async function generatePointsFromGeoJson(
       throw new Error(`Не удалось сгенерировать точки. Возможно, указанный регион слишком мал или имеет неподходящую форму для внутреннего отступа в ${radiusKm} км.`);
     }
 
-    // Use a hexagonal grid for optimal coverage.
-    // Setting the cell side length to radiusKm ensures overlap and full coverage.
-    const hexGrid = turf.hexGrid(turf.bbox(bufferedPolygon), radiusKm, { units: 'kilometers' });
+    const bbox = turf.bbox(bufferedPolygon);
+    const hexGrid = turf.hexGrid(bbox, radiusKm, { units: 'kilometers' });
+    const totalHexagons = hexGrid.features.length;
 
     const points: { latitude: number; longitude: number; }[] = [];
-    turf.featureEach(hexGrid, (cell: any) => {
+    let processedCount = 0;
+
+    for (const cell of hexGrid.features) {
       const center = turf.centroid(cell);
       if (turf.booleanPointInPolygon(center, bufferedPolygon)) {
         const [longitude, latitude] = center.geometry.coordinates;
         points.push({ latitude, longitude });
       }
-    });
+      processedCount++;
+      if (processedCount % 100 === 0 || processedCount === totalHexagons) {
+         await new Promise(resolve => setTimeout(resolve, 0)); // Allow UI to update
+         yield { type: 'progress', value: (processedCount / totalHexagons) * 100 };
+      }
+    }
 
     if (points.length === 0) {
        throw new Error(`Не удалось сгенерировать точки. Внутри созданной буферной зоны (${radiusKm} км) не поместилось ни одного центра точки.`);
@@ -148,19 +160,21 @@ export async function generatePointsFromGeoJson(
     };
     const regionSlug = slugify(regionName);
     const lines = points.map(p => `${regionSlug}:${radiusKm}km:${p.latitude}, ${p.longitude}`);
-
-    const files: OutputFile[] = [];
+    
     const pointsPerFile = 200;
+    const totalFiles = Math.ceil(lines.length / pointsPerFile);
+    yield { type: 'totalFiles', value: totalFiles };
+
     for (let i = 0; i < lines.length; i += pointsPerFile) {
         const chunk = lines.slice(i, i + pointsPerFile);
         const fileNumber = (i / pointsPerFile) + 1;
-        files.push({
+        const outputFile: OutputFile = {
             name: `${regionSlug}_part${fileNumber}.txt`,
             content: chunk.join('\n'),
-        });
+        };
+        await new Promise(resolve => setTimeout(resolve, 50)); // Simulate work and allow UI to update
+        yield { type: 'file', value: outputFile };
     }
-
-    return files;
 
   } catch (e: any) {
     console.error("Error during point generation:", e);
