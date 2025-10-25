@@ -46,7 +46,7 @@ function App() {
       setIsSearching(true);
       setSearchError(null);
       try {
-        const response = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(searchQuery)}&polygon_geojson=1`, {
+        const response = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(searchQuery)}&polygon_geojson=1&countrycodes=ru,ua`, {
           headers: {
             // Prioritize Russian results, fallback to English. This significantly improves search relevance for Russian queries.
             'Accept-Language': 'ru,en;q=0.9'
