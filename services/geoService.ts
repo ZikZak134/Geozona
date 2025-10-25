@@ -140,8 +140,16 @@ export async function* generatePointsFromGeoJson(
         points.push({ latitude, longitude });
       }
       processedCount++;
+      
+      // Await more frequently (every 25 iterations) to prevent blocking the main thread.
+      // This keeps the UI responsive during heavy calculations.
+      if (processedCount % 25 === 0) {
+        await new Promise(resolve => setTimeout(resolve, 0));
+      }
+
+      // Yield progress less frequently (every 100 iterations) to avoid overwhelming
+      // React with state updates, which can also cause sluggishness.
       if (processedCount % 100 === 0 || processedCount === totalHexagons) {
-         await new Promise(resolve => setTimeout(resolve, 0)); // Allow UI to update
          yield { type: 'progress', value: (processedCount / totalHexagons) * 100 };
       }
     }

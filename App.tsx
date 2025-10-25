@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import FileUploader from './components/FileUploader';
 import ResultDisplay from './components/ResultDisplay';
 import { parseExcelToGeoJson, generatePointsFromGeoJson } from './services/geoService';
@@ -24,6 +24,7 @@ function App() {
   const [searchQuery, setSearchQuery] = useState('');
   const [isSearching, setIsSearching] = useState(false);
   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
+  const [searchError, setSearchError] = useState<string | null>(null);
 
 
   const handleFileSelect = (file: File) => {
@@ -34,24 +35,43 @@ function App() {
     }
   };
 
-  const handleSearch = async () => {
-    if (!searchQuery.trim()) return;
-    setIsSearching(true);
-    setError(null);
-    setSearchResults([]);
-    try {
-      const response = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(searchQuery)}&polygon_geojson=1`);
-      if (!response.ok) {
-        throw new Error('Сетевой ответ от сервиса поиска был не в порядке.');
-      }
-      const data = await response.json();
-      setSearchResults(data.filter((item: any) => item.geojson && (item.geojson.type === 'Polygon' || item.geojson.type === 'MultiPolygon')));
-    } catch (err) {
-      setError('Не удалось выполнить поиск. Проверьте ваше интернет-соединение.');
-    } finally {
-      setIsSearching(false);
+  useEffect(() => {
+    if (searchQuery.trim().length < 3) {
+      setSearchResults([]);
+      setSearchError(null);
+      return;
     }
-  };
+
+    const performSearch = async () => {
+      setIsSearching(true);
+      setSearchError(null);
+      try {
+        const response = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(searchQuery)}&polygon_geojson=1`, {
+          headers: {
+            // Prioritize Russian results, fallback to English. This significantly improves search relevance for Russian queries.
+            'Accept-Language': 'ru,en;q=0.9'
+          }
+        });
+        if (!response.ok) {
+          throw new Error('Сетевой ответ от сервиса поиска был не в порядке.');
+        }
+        const data = await response.json();
+        setSearchResults(data.filter((item: any) => item.geojson && (item.geojson.type === 'Polygon' || item.geojson.type === 'MultiPolygon')));
+      } catch (err) {
+        setSearchError('Не удалось выполнить поиск. Проверьте ваше интернет-соединение.');
+        setSearchResults([]);
+      } finally {
+        setIsSearching(false);
+      }
+    };
+
+    const delayDebounceFn = setTimeout(() => {
+      performSearch();
+    }, 500); // 500ms delay
+
+    return () => clearTimeout(delayDebounceFn);
+  }, [searchQuery]);
+
 
   const handleSelectSearchResult = (result: SearchResult) => {
     const geoJsonString = JSON.stringify(result.geojson);
@@ -62,6 +82,7 @@ function App() {
     setRegionName(result.display_name.split(',')[0]);
     setSearchResults([]);
     setSearchQuery('');
+    setSearchError(null);
   };
 
   const handleGenerate = async () => {
@@ -133,27 +154,41 @@ function App() {
           {/* --- Online Search Section --- */}
           <div className="bg-slate-800 border border-slate-700 p-6 rounded-xl shadow-lg">
             <h2 className="text-xl font-semibold mb-4 text-gray-100">1. Найти регион онлайн (рекомендуется)</h2>
-            <div className="flex flex-col sm:flex-row gap-4">
+            <div className="relative">
               <input
                 type="text"
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="Область, город, район или село..."
-                className="flex-grow bg-slate-900 text-white border border-slate-600 rounded-lg px-4 py-3 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-300"
+                placeholder="Начните вводить для поиска региона..."
+                className="w-full bg-slate-900 text-white border border-slate-600 rounded-lg px-4 py-3 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-300"
               />
-              <button onClick={handleSearch} disabled={isSearching} className="bg-blue-600 hover:bg-blue-500 disabled:bg-slate-600 disabled:cursor-not-allowed text-white font-bold py-3 px-6 rounded-lg transition-colors duration-300">
-                {isSearching ? 'Поиск...' : 'Найти'}
-              </button>
+               {isSearching && (
+                <div className="absolute inset-y-0 right-0 flex items-center pr-4 pointer-events-none">
+                  <svg className="animate-spin h-5 w-5 text-slate-400" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                  </svg>
+                </div>
+              )}
             </div>
              <p className="text-xs text-slate-500 mt-2">Например: "Сахалинская область", "город Суздаль", "район Хамовники Москва"</p>
-            {searchResults.length > 0 && (
+            {searchQuery.length >= 3 && (
               <div className="mt-4 space-y-2 max-h-60 overflow-y-auto pr-2">
-                {searchResults.map((result, index) => (
-                  <div key={index} className="flex items-center justify-between p-3 bg-slate-700/50 rounded-md hover:bg-slate-700 transition-colors duration-300">
-                    <span className="text-sm text-gray-300">{result.display_name}</span>
-                    <button onClick={() => handleSelectSearchResult(result)} className="bg-sky-600 hover:bg-sky-500 text-white font-bold py-1 px-3 rounded text-sm transition-colors duration-300 flex-shrink-0">Использовать</button>
-                  </div>
-                ))}
+                {searchResults.length > 0 ? (
+                  searchResults.map((result, index) => (
+                    <button 
+                      key={index} 
+                      onClick={() => handleSelectSearchResult(result)} 
+                      className="w-full text-left p-3 bg-slate-700/50 rounded-md hover:bg-slate-700 transition-colors duration-300 cursor-pointer focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    >
+                      <span className="text-sm text-gray-300">{result.display_name}</span>
+                    </button>
+                  ))
+                ) : searchError ? (
+                  <div className="p-3 text-center text-red-400">{searchError}</div>
+                ) : !isSearching ? (
+                  <div className="p-3 text-center text-slate-400">Ничего не найдено. Попробуйте другой запрос.</div>
+                ) : null}
               </div>
             )}
           </div>
